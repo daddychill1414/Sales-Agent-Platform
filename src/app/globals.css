@@ -1,0 +1,104 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #0D0D12;
+  --color-accent: #C9A84C;
+  --color-background: #FAF8F5;
+  --color-surface: #ffffff;
+  --color-foreground: #2A2A35;
+  --color-muted: #827C75;
+  
+  --font-sans: var(--font-inter), sans-serif;
+  --font-serif: var(--font-cormorant), serif;
+
+  --radius-xl: 1rem;
+  --radius-2xl: 1.5rem;
+  --radius-3xl: 2rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0D0D12;
+    --foreground: #FAF8F5;
+    --surface: #1a1a24;
+    --primary: #FAF8F5;
+  }
+}
+
+:root {
+  --background: #FAF8F5;
+  --foreground: #2A2A35;
+  --surface: #ffffff;
+  --primary: #0D0D12;
+  --accent: #C9A84C;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Premium utility classes */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.05);
+}
+
+.dark .glass-panel {
+  background: rgba(26, 26, 36, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.heading-serif {
+  font-family: var(--font-serif);
+}
+
+.text-accent {
+  color: var(--accent);
+}
+
+.bg-accent {
+  background-color: var(--accent);
+}
+
+.btn-primary {
+  @apply inline-flex items-center justify-center px-6 py-3 text-sm font-medium transition-all duration-300 rounded-full;
+  background-color: var(--accent);
+  color: #000000;
+}
+
+.btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 25px -5px rgba(201, 168, 76, 0.4), 0 8px 10px -6px rgba(201, 168, 76, 0.1);
+}
+
+.btn-outline {
+  @apply inline-flex items-center justify-center px-6 py-3 text-sm font-medium transition-all duration-300 rounded-full border border-current;
+  color: var(--primary);
+}
+
+.dark .btn-outline {
+  color: var(--foreground);
+}
+
+.btn-outline:hover {
+  background-color: var(--primary);
+  color: var(--background);
+  transform: translateY(-2px);
+}
+
+.dark .btn-outline:hover {
+  background-color: var(--foreground);
+  color: var(--primary);
+}
+
+/* Base transitions */
+* {
+  transition-property: background-color, border-color, color, fill, stroke, box-shadow;
+  transition-duration: 200ms;
+}
