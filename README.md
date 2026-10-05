@@ -1,36 +1,56 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Phenomenon Labs - Sales Agent Recruitment Platform
 
-## Getting Started
+This is a comprehensive Sales Agent Recruitment Platform built with Next.js 14, Tailwind CSS, GSAP, and Supabase.
 
-First, run the development server:
+## What is Working Right Now
 
+The platform is fully scaffolded with a complete UI/UX mapped to the database schema. Here is the breakdown:
+
+### 1. Public Agent Portal
+- **Landing Page (`/`)**: A dynamic showcase of the agency with premium scroll animations, glassmorphism UI, and custom typography.
+- **Application Flow (`/apply`)**: A robust multi-step wizard form to collect candidate details, employment history, and upload resumes.
+- **Public Exam Interface (`/exam`)**: A distraction-free assessment module for candidates to take pre-employment tests and answer high-ticket sales scenario questions.
+- **Portal Login (`/login`)**: Built-in Supabase authentication to secure the `admin` panel and protect routes.
+
+### 2. Secure Admin Dashboard (`/admin`)
+- **Dashboard Overview (`/admin`)**: Real-time KPI statistics (Total applications, hired agents, pending reviews).
+- **Applicant Pipeline (`/admin/applicants`)**: Full applicant tracking Kanban/List hybrid view.
+- **Exam Management (`/admin/exams`)**: A hub to create assessments and monitor test answers.
+- **Interview Scheduling (`/admin/interviews`)**: A calendar feed to schedule and manage applicant interviews.
+- **Document Vault (`/admin/documents`)**: Secure storage space for applicant resumes and HR documents.
+- **HR Knowledge Base (`/admin/knowledge`)**: Content manager for training manuals and guidelines.
+
+---
+
+## How to Login to Admin
+
+To access the `/admin` portal, you must be authenticated *and* have an `admin` role in the database. When you visit `/login`, the middleware will check your status.
+
+**Follow these exact steps to create your Admin account:**
+
+1. **Sign Up**: First, create a regular account. You can do this by submitting the application at `http://localhost:3000/apply` (you can use dummy data) OR by directly adding a user via your Supabase Dashboard -> Authentication -> Add User.
+2. **Elevate Your Role in Supabase**:
+   - Go to your Supabase Project Dashboard online.
+   - Click on **Table Editor** on the left-hand menu.
+   - Select the `profiles` table.
+   - Find the row with your newly created user's email/id.
+   - Double click on the `role` column cell for your user.
+   - Change the value from `applicant` to `admin` and hit Save.
+3. **Login & Access**:
+   - Go back to your app at `http://localhost:3000/login`.
+   - Sign in with your email and password.
+   - You will automatically be redirected to the secure `http://localhost:3000/admin` dashboard and all the pages will be unlocked!
+
+## Getting Started Locally
+
+Install dependencies:
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Start the development server:
+```bash
+npm run dev
+```
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Open [http://localhost:3000](http://localhost:3000) in your browser.

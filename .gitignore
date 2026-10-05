@@ -39,3 +39,11 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# temp & analysis docs
+tmp_check.js
+"implementation_plan using"
+"implementation_plan week 4"
+"platform_assessment March 10"
+Re_audit_and_upgrades
+

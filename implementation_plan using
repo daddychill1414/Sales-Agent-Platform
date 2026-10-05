@@ -1,0 +1,732 @@
+# OneNetworx Platform — Implementation Plan v2 (Decisions Locked)
+
+> **Goal:** Transform the current recruitment platform into an enterprise-grade, multi-role agent portal with automated screening, evaluation pipeline, e-contracts, training, monitoring, and full admin control.
+
+---
+
+## ✅ Decisions Locked In
+
+| Question | Decision |
+|---|---|
+| Super Admin | Hardcoded email (e.g., boss's email) in `.env` |
+| Training Format | Both video (YouTube/Vimeo embeds) AND text/document |
+| E-Contract | Build a contract BUILDER — admin types it in |
+| Email Provider | **Resend** (100/day free, upgrade later) |
+| Screening Disqualification | Silently flag, let HR decide (no instant rejection) |
+| Screening Questions | Editable by admin/screener, based on job requirements |
+| Applicant Login | **Delayed login** — no account on apply, magic link sent later when HR approves |
+
+---
+
+## 1. Role System (5 Tiers)
+
+### Database Change
+```sql
+ALTER TABLE public.profiles 
+  DROP CONSTRAINT profiles_role_check,
+  ADD CONSTRAINT profiles_role_check 
+    CHECK (role IN ('applicant', 'screener', 'hr_admin', 'super_admin', 'agent'));
+```
+
+### Roles & Permissions Matrix
+
+| Permission | Super Admin | HR Admin | Screener | Agent | Applicant |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Manage other admins/roles | ✅ | ❌ | ❌ | ❌ | ❌ |
+| View audit logs | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Configure platform settings | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Edit hero/landing page | ✅ | ✅ | ❌ | ❌ | ❌ |
+| View all applicants | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Advance/reject applicants | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Screen & flag applicants | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Edit screening questions | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Manage exams | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Schedule interviews | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Send emails | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Manage contracts | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Manage training content | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Export data (CSV/PDF) | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Access training portal | ❌ | ❌ | ❌ | ✅ | ❌ |
+| Sign contracts | ❌ | ❌ | ❌ | ✅ | ❌ |
+| Take exams | ❌ | ❌ | ❌ | ❌ | ✅ |
+| View own application status | ❌ | ❌ | ❌ | ✅ | ✅ |
+
+### Super Admin Setup
+- Hardcoded in `.env.local`: `SUPER_ADMIN_EMAIL=boss@company.com`
+- On first login, if email matches → auto-set role to `super_admin`
+- Super Admin can then invite HR Admins and Screeners from `/admin/team`
+
+### New Files
+- `src/lib/permissions.ts` — Central permission map
+- `src/app/admin/team/page.tsx` — Manage staff, invite new admins, assign roles
+- `src/api/admin/invite/route.ts` — Send invite emails to new staff
+
+---
+
+## 2. Applicant Flow — Delayed Login (No Account on Apply)
+
+### New Application Flow
+
+```
+PUBLIC (no login required):
+════════════════════════════
+Step 0: Screening Questions (knockout check)
+  │  
+  │  ALL answers stored regardless of qualification
+  │  Silently flagged if fails requirements
+  │  
+Step 1: Personal Details (name, email, phone)
+  │  NO password field — no account created
+  │  
+Step 2: Professional Background
+  │  Work experience, sales background
+  │  
+Step 3: Resume Upload
+  │  Upload via server-side API (no auth needed)
+  │  
+Step 4: Terms & Privacy Agreement
+  │  Checkboxes + timestamp
+  │  
+  ✅ "Application Received" confirmation page
+     (They get a confirmation email via Resend)
+     (They get a tracking code: e.g. "ONX-2026-0042")
+
+LATER (HR decides to advance them):
+════════════════════════════════════
+HR reviews application → clicks "Approve & Send Account Invite"
+  │
+  │  System sends magic link email to applicant
+  │  Applicant clicks link → creates password → account active
+  │  
+  ✅ Now they can log in to:
+     ├── /dashboard — See their application status
+     ├── /exam — Take assigned exams
+     ├── /dashboard/contract — Sign e-contract (if hired)
+     └── /dashboard/training — Access training (if agent)
+```
+
+### Database Change
+Since applicants no longer have a Supabase auth account at application time, we need a separate table:
+
+```sql
+-- Stores applications BEFORE they have an auth account
+CREATE TABLE public.applications (
+  id uuid default gen_random_uuid() primary key,
+  tracking_code text unique not null,     -- "ONX-2026-0042"
+  
+  -- Personal Details
+  first_name text not null,
+  last_name text not null,
+  email text not null,
+  phone text,
+  
+  -- Professional Background
+  work_experience text,
+  sales_background text,
+  
+  -- Resume
+  resume_url text,
+  
+  -- Screening
+  screening_responses jsonb,              -- { question_id: answer, ... }
+  screening_qualified boolean,            -- auto-computed
+  screening_flags jsonb,                  -- reasons for disqualification
+  
+  -- Job
+  applied_position_id uuid references job_positions(id),
+  
+  -- Legal Consent
+  terms_accepted_at timestamptz,
+  privacy_accepted_at timestamptz,
+  
+  -- Pipeline
+  stage text default 'New' check (stage in (
+    'New',                    -- just submitted
+    'Screening Review',       -- screener is reviewing
+    'Qualified',              -- passed screening
+    'Disqualified',           -- failed screening (HR decided)
+    'Account Invited',        -- magic link sent
+    'Exam Assigned',          -- exam is ready for them
+    'Exam Completed',         -- they finished the exam
+    'Interview Scheduled',
+    'Interview Completed', 
+    'Offer Extended',
+    'Contract Sent',
+    'Contract Signed',
+    'Hired',
+    'Rejected',
+    'Withdrawn'
+  )),
+  
+  -- Link to auth account (NULL until they create one)
+  user_id uuid references auth.users(id),
+  
+  -- Notes
+  internal_notes text,
+  
+  -- Timestamps
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+```
+
+> [!IMPORTANT]
+> This `applications` table replaces the old approach of writing directly to `profiles`. It solves the "one job limit" bug AND supports the delayed login flow. One person can submit multiple applications to different positions.
+
+### Tracking Code System
+- Format: `ONX-{YEAR}-{4-DIGIT-SEQUENTIAL}` (e.g., `ONX-2026-0042`)
+- Applicant receives this in their confirmation email
+- Public page `/track` — enter email or tracking code to see status (without login)
+
+### New/Modified Files
+- [MODIFY] `src/components/ApplicationForm.tsx` — Remove password field, add screening step & legal consent step, remove Supabase auth signup
+- [NEW] `src/components/ScreeningStep.tsx` — Screening questions UI
+- [NEW] `src/components/LegalConsentStep.tsx` — Terms & privacy checkboxes
+- [NEW] `src/app/track/page.tsx` — Public application tracking page
+- [NEW] `src/api/applications/route.ts` — CRUD for applications (no auth required to POST)
+- [NEW] `src/api/applications/invite/route.ts` — Send magic link to create account
+- [MODIFY] `src/api/upload-resume/route.ts` — Allow upload without auth (use tracking code)
+
+---
+
+## 3. Screening Questions Engine
+
+### How It Works
+
+```
+Admin/Screener configures questions at /admin/screening:
+──────────────────────────────────────────────────────
+Question: "Are you a college graduate?"
+Type: Yes/No
+Required: ✅
+Priority: CRITICAL (if "No" → auto-flag as potentially unqualified)
+
+Question: "Do you have at least 1 year of sales experience?"
+Type: Yes/No  
+Required: ✅
+Priority: HIGH (if "No" → flag but don't auto-disqualify)
+
+Question: "What is your highest educational attainment?"
+Type: Multiple Choice [College Graduate, Undergraduate, Senior High, Others]
+Required: ✅
+Priority: CRITICAL
+Qualifying Answers: [College Graduate] ← only this passes
+
+Question: "Are you willing to do commission-based work?"
+Type: Yes/No
+Required: ✅
+Priority: CRITICAL (if "No" → auto-flag)
+
+Question: "How did you hear about OneNetworx?"
+Type: Multiple Choice [Social Media, Referral, Job Board, Walk-in, Others]
+Required: ✅
+Priority: INFO (no flag, just data collection)
+```
+
+### Flagging Logic (Silent)
+- **CRITICAL questions**: If answer doesn't match qualifying answer → applicant is flagged as `screening_qualified: false`
+- **HIGH questions**: Flagged with a warning icon but still marked as potentially qualified
+- **INFO questions**: Data collection only, no impact on qualification
+- The applicant **never knows** they were flagged — they always see "Application Received"
+- HR sees a red/yellow/green badge on each application
+
+### Database
+
+```sql
+CREATE TABLE public.screening_questions (
+  id uuid default gen_random_uuid() primary key,
+  question_text text not null,
+  question_type text not null check (question_type in ('yes_no', 'multiple_choice', 'text', 'number_range')),
+  options jsonb,                          -- for multiple choice: ["Option A", "Option B"]
+  qualifying_answers jsonb,               -- answers that PASS: ["Yes"] or ["College Graduate"]
+  priority text default 'info' check (priority in ('critical', 'high', 'info')),
+  is_required boolean default true,
+  order_index integer not null default 0,
+  is_active boolean default true,
+  created_by uuid references profiles(id),
+  created_at timestamptz default now()
+);
+```
+
+### New Files
+- `src/app/admin/screening/page.tsx` — Manage screening questions (drag-to-reorder, CRUD)
+- `src/components/ScreeningStep.tsx` — Render questions dynamically in application form
+- `src/api/screening/route.ts` — CRUD API for screening questions
+
+---
+
+## 4. Evaluation & Applicant 360° Profile
+
+### `/admin/applicants/[id]` — Full Profile Page
+
+Tabbed layout showing everything about an applicant:
+
+**Tab 1 — Overview:**
+- Personal details, contact info
+- Screening answers with pass/fail badges
+- Application timeline (every stage change, email sent, etc.)
+
+**Tab 2 — Exam Results:**
+- Score breakdown per question
+- Their answer vs. correct answer
+- Manual grading area for essay/open-ended questions
+
+**Tab 3 — Interview:**
+- Scheduled interviews with dates/links
+- Interview notes from HR
+- Rating (1-5 stars)
+
+**Tab 4 — Documents:**
+- Resume viewer (embedded PDF)
+- E-Contract status
+- Any uploaded certificates
+
+**Action Sidebar (always visible):**
+- Change stage dropdown
+- Send email (template picker)
+- Schedule interview
+- Add internal note
+- Quick actions: Reject / Advance / Hire
+
+### Database
+
+```sql
+CREATE TABLE public.evaluation_notes (
+  id uuid default gen_random_uuid() primary key,
+  application_id uuid references applications(id) on delete cascade,
+  author_id uuid references profiles(id),
+  content text not null,
+  note_type text default 'general' check (note_type in ('general', 'screening', 'interview', 'exam', 'system')),
+  created_at timestamptz default now()
+);
+```
+
+### New Files
+- `src/app/admin/applicants/[id]/page.tsx` — Full 360° profile
+- `src/components/admin/ApplicantTabs.tsx`
+- `src/components/admin/EvaluationScorecard.tsx`
+- `src/components/admin/InternalNotes.tsx`
+- `src/components/admin/ApplicationTimeline.tsx`
+
+---
+
+## 5. Terms & Privacy
+
+### New Pages
+- `src/app/terms/page.tsx` — Full Terms of Service
+- `src/app/privacy/page.tsx` — Full Data Privacy Policy 
+
+### Application Form Step 4
+```
+┌─────────────────────────────────────────────┐
+│  Terms & Agreement                           │
+│                                              │
+│  ☐ I have read and agree to the              │
+│    Terms of Service                          │
+│                                              │
+│  ☐ I consent to the collection and           │
+│    processing of my personal data as         │
+│    described in the Data Privacy Policy      │
+│                                              │
+│  ☐ I agree to receive communications         │
+│    regarding my application (optional)       │
+│                                              │
+│           [Submit Application]               │
+└─────────────────────────────────────────────┘
+```
+
+### Admin Editable
+- `/admin/settings/legal` — Admin can edit Terms & Privacy text content
+- Stored in `site_settings` table
+
+---
+
+## 6. E-Contract Builder
+
+### Admin Side — `/admin/contracts`
+Rich text editor where admin builds contract templates:
+- WYSIWYG editor (TipTap or similar)
+- Template variables: `{{FULL_NAME}}`, `{{DATE}}`, `{{POSITION}}`, `{{START_DATE}}`
+- Preview mode
+- Save multiple templates
+
+### Agent Side — `/dashboard/contract`
+- Contract rendered with their details filled in
+- Digital signature: type full name + "I agree" checkbox + date
+- Download signed contract as PDF
+
+### Database
+
+```sql
+CREATE TABLE public.contract_templates (
+  id uuid default gen_random_uuid() primary key,
+  title text not null,
+  content text not null,          -- rich text / HTML
+  created_by uuid references profiles(id),
+  is_active boolean default true,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+CREATE TABLE public.contracts (
+  id uuid default gen_random_uuid() primary key,
+  application_id uuid references applications(id),
+  template_id uuid references contract_templates(id),
+  rendered_content text,          -- template with variables filled in
+  status text default 'pending' check (status in ('pending', 'sent', 'viewed', 'signed', 'expired')),
+  signed_name text,
+  signed_at timestamptz,
+  contract_pdf_url text,
+  created_at timestamptz default now()
+);
+```
+
+### New Files
+- `src/app/admin/contracts/page.tsx` — Template list + editor
+- `src/app/admin/contracts/[id]/page.tsx` — Edit template (rich text editor)
+- `src/app/dashboard/contract/page.tsx` — Agent views & signs
+- `src/components/ContractEditor.tsx` — TipTap rich text editor
+- `src/components/ContractViewer.tsx` — Read-only view + signature
+- `src/api/contracts/route.ts`
+
+---
+
+## 7. Training Portal (Video + Text)
+
+### Admin Side — `/admin/training`
+- Create training modules with:
+  - Title & description
+  - **Video embed** (paste YouTube/Vimeo URL)
+  - **Rich text content** (TipTap editor for documents/instructions)
+  - **Attached files** (PDFs, slides)
+  - **Module quiz** (reuse existing exam engine)
+  - Order/sequence of modules
+  - Mark as required or optional
+
+### Agent Side — `/dashboard/training`
+```
+Training Progress: ████████░░ 75% Complete
+─────────────────────────────────────────
+Module 1: Company Overview          ✅ Completed
+Module 2: Product Knowledge         ✅ Completed  
+Module 3: Sales Techniques          🔵 In Progress (60%)
+Module 4: Compliance & Ethics       ⬜ Locked
+Module 5: Final Assessment          ⬜ Locked
+```
+
+### Database
+
+```sql
+CREATE TABLE public.training_modules (
+  id uuid default gen_random_uuid() primary key,
+  title text not null,
+  description text,
+  content text,                   -- rich text for document-based lessons
+  video_url text,                 -- YouTube/Vimeo embed URL
+  attachment_urls jsonb,          -- array of file URLs
+  quiz_exam_id uuid references exams(id),  -- reuse exam engine for quizzes
+  order_index integer not null default 0,
+  is_required boolean default true,
+  is_active boolean default true,
+  created_by uuid references profiles(id),
+  created_at timestamptz default now()
+);
+
+CREATE TABLE public.training_progress (
+  id uuid default gen_random_uuid() primary key,
+  agent_id uuid references profiles(id),
+  module_id uuid references training_modules(id),
+  status text default 'locked' check (status in ('locked', 'not_started', 'in_progress', 'completed')),
+  completed_at timestamptz,
+  quiz_score integer,
+  UNIQUE(agent_id, module_id)
+);
+```
+
+### New Files
+- `src/app/admin/training/page.tsx` — Module management
+- `src/app/admin/training/[id]/page.tsx` — Edit module content
+- `src/app/dashboard/training/page.tsx` — Agent training hub
+- `src/app/dashboard/training/[id]/page.tsx` — Module viewer (video + text + quiz)
+- `src/api/training/route.ts`
+
+---
+
+## 8. Audit Log / Monitor Module (Super Admin Only)
+
+### Every admin action is logged:
+
+```sql
+CREATE TABLE public.audit_log (
+  id uuid default gen_random_uuid() primary key,
+  user_id uuid references profiles(id),
+  user_email text,
+  user_role text,
+  action text not null,
+  description text,               -- human-readable: "Advanced John Doe from Review to Interview"
+  target_type text,               -- 'application', 'exam', 'contract', 'settings'
+  target_id uuid,
+  metadata jsonb,                 -- { from_stage: 'Review', to_stage: 'Interview' }
+  ip_address text,
+  created_at timestamptz default now()
+);
+```
+
+### Super Admin `/admin/audit` Page
+- Searchable, filterable table
+- Filter by: admin user, action type, date range, target
+- Color-coded action types
+- Export to CSV
+- Shows exactly who did what, when
+
+### New Files
+- `src/app/admin/audit/page.tsx` — Audit log viewer (super_admin only)
+- `src/lib/audit.ts` — `logAuditEvent()` utility called in every API route
+- `src/api/admin/audit/route.ts`
+
+---
+
+## 9. Dashboard Enhancements
+
+### Enhanced Admin Dashboard
+- HR performance metrics (applications reviewed today/week)
+- Pipeline funnel visualization
+- Screening pass rate analytics
+- Target tracker (set monthly hiring goals)
+
+### Pipeline Kanban Board — `/admin/pipeline`
+- Drag-and-drop columns: New → Screening → Qualified → Exam → Interview → Offer → Hired
+- Each card = one applicant
+- Quick actions from the card (send email, schedule, advance)
+
+### New Files
+- `src/app/admin/pipeline/page.tsx` — Kanban board
+- `src/components/admin/KanbanBoard.tsx`
+- `src/components/admin/TargetTracker.tsx`
+
+---
+
+## 10. Downloadable Information / Export
+
+| Export | Format | Location |
+|---|---|---|
+| Applicant list | CSV | `/admin/applicants` → Export button |
+| Single applicant profile | PDF | `/admin/applicants/[id]` → Download |
+| Exam results | CSV | `/admin/exams` → Export |
+| Audit log | CSV | `/admin/audit` → Export |
+| Interview schedule | ICS (Calendar) | `/admin/interviews` → Export |
+| Dashboard report | PDF | `/admin` → Download Report |
+| Contract (signed) | PDF | `/dashboard/contract` → Download |
+
+### Libraries
+- `jspdf` + `html2canvas` for PDF generation
+- `papaparse` for CSV export
+
+### New Files
+- `src/lib/export.ts` — CSV/PDF generation utilities
+- `src/api/admin/export/route.ts` — Server-side export endpoint
+
+---
+
+## 11. Customizable Hero Section (Admin CMS)
+
+### Admin `/admin/settings/hero` Page
+Editable fields with live preview:
+- Hero headline text
+- Hero subtitle text  
+- CTA button text + link
+- Background image upload
+- Accent color picker
+
+### Database
+
+```sql
+CREATE TABLE public.site_settings (
+  key text primary key,
+  value jsonb not null,
+  updated_by uuid references profiles(id),
+  updated_at timestamptz default now()
+);
+
+-- Example rows:
+-- key: 'hero', value: { headline: "...", subtitle: "...", cta_text: "...", bg_image: "..." }
+-- key: 'legal_terms', value: { content: "..." }
+-- key: 'legal_privacy', value: { content: "..." }
+```
+
+### New Files
+- `src/app/admin/settings/page.tsx` — Settings hub
+- `src/app/admin/settings/hero/page.tsx` — Hero editor
+- `src/app/admin/settings/legal/page.tsx` — Terms & Privacy editor
+- `src/api/settings/route.ts`
+
+---
+
+## 12. Email System (Resend)
+
+### Setup
+- Install `resend` npm package
+- Add `RESEND_API_KEY` to `.env.local`
+- Free tier: 100 emails/day (plenty for starting out)
+
+### Email Templates
+1. **Application Received** — auto-sent on form submission
+2. **Account Invitation** — magic link when HR approves
+3. **Exam Assignment** — when exam is assigned
+4. **Interview Scheduled** — with date, time, link
+5. **Offer / Contract** — congratulations + contract link
+6. **Rejection** — professional rejection letter
+7. **Custom** — HR types a custom message
+
+### Email Log Database
+
+```sql
+CREATE TABLE public.email_log (
+  id uuid default gen_random_uuid() primary key,
+  application_id uuid references applications(id),
+  template_name text,
+  subject text,
+  recipient_email text,
+  status text default 'sent' check (status in ('queued', 'sent', 'delivered', 'failed')),
+  sent_by uuid references profiles(id),
+  sent_at timestamptz default now()
+);
+```
+
+### Visual Indicators
+- On applicant cards: 📧 "Last emailed: 2d ago" or "No email sent"
+- Email history in applicant 360° profile
+
+### New Files
+- `src/lib/email.ts` — Resend email utility
+- `src/lib/email-templates/` — React Email templates
+- `src/api/send-email/route.ts` — Enhanced with Resend + logging
+
+---
+
+## 📦 Full Database Migration Summary
+
+### New Tables (10)
+| Table | Purpose |
+|---|---|
+| `applications` | Core application data (replaces writing to profiles) |
+| `screening_questions` | Admin-configurable screening questions |
+| `evaluation_notes` | Internal HR notes per applicant |
+| `contract_templates` | Rich text contract templates |
+| `contracts` | Individual contracts + signature tracking |
+| `training_modules` | Training content (video + text) |
+| `training_progress` | Agent training completion |
+| `audit_log` | Every admin action logged |
+| `site_settings` | CMS settings (hero, legal pages) |
+| `email_log` | Track all emails sent |
+
+### Modified Tables
+| Table | Change |
+|---|---|
+| `profiles` | Expand role check to 5 tiers, remove application-specific columns |
+
+---
+
+## 🏗️ Phased Build Order
+
+### Phase 1 — Foundation (Database + Roles + Screening)
+- [ ] Database migration (all new tables)
+- [ ] Role system expansion (5 tiers + permissions)
+- [ ] Super Admin setup (hardcoded email)
+- [ ] Screening questions engine (admin CRUD)
+- [ ] Refactor application form (remove password, add screening step + legal consent)
+- [ ] Application tracking page (`/track`)
+- [ ] Terms & Privacy pages
+
+### Phase 2 — Evaluation & Email
+- [ ] Install & configure Resend
+- [ ] Applicant 360° profile page
+- [ ] Internal notes system
+- [ ] Email templates + logging
+- [ ] Magic link invitation flow
+- [ ] Application timeline component
+
+### Phase 3 — Contracts & Training
+- [ ] Contract template builder (TipTap editor)
+- [ ] Contract signing flow (agent side)
+- [ ] Training module builder (admin)
+- [ ] Training portal (agent dashboard)
+
+### Phase 4 — Monitoring & Export
+- [ ] Audit log system + viewer
+- [ ] CSV/PDF export utilities
+- [ ] Pipeline Kanban board
+- [ ] Dashboard enhancements (metrics, targets)
+
+### Phase 5 — Customization & Polish
+- [ ] Customizable hero section (admin CMS)
+- [ ] Legal pages editor
+- [ ] Team management page (invite admins)
+- [ ] Bulk actions
+- [ ] Notification center upgrade
+- [ ] Final security audit
+
+---
+
+## 📂 New File Structure Overview
+
+```
+src/
+├── app/
+│   ├── admin/
+│   │   ├── applicants/[id]/page.tsx     ← 360° profile
+│   │   ├── audit/page.tsx               ← Audit log (super_admin)
+│   │   ├── contracts/page.tsx           ← Contract templates
+│   │   ├── contracts/[id]/page.tsx      ← Edit template
+│   │   ├── pipeline/page.tsx            ← Kanban board
+│   │   ├── screening/page.tsx           ← Manage screening Q's
+│   │   ├── settings/page.tsx            ← Settings hub
+│   │   ├── settings/hero/page.tsx       ← Hero editor
+│   │   ├── settings/legal/page.tsx      ← Terms/Privacy editor
+│   │   ├── team/page.tsx                ← Manage staff roles
+│   │   └── training/page.tsx            ← Training content manager
+│   ├── dashboard/
+│   │   ├── contract/page.tsx            ← Agent signs contract
+│   │   └── training/page.tsx            ← Agent training portal
+│   │   └── training/[id]/page.tsx       ← Module viewer
+│   ├── track/page.tsx                   ← Public application tracker
+│   ├── terms/page.tsx                   ← Terms of Service
+│   ├── privacy/page.tsx                 ← Privacy Policy
+│   └── api/
+│       ├── applications/route.ts        ← Application CRUD
+│       ├── applications/invite/route.ts ← Magic link sender
+│       ├── screening/route.ts           ← Screening Q CRUD
+│       ├── contracts/route.ts           ← Contract CRUD
+│       ├── training/route.ts            ← Training CRUD
+│       ├── admin/audit/route.ts         ← Audit log fetch
+│       ├── admin/export/route.ts        ← CSV/PDF export
+│       └── settings/route.ts            ← Site settings CRUD
+├── components/
+│   ├── ScreeningStep.tsx
+│   ├── LegalConsentStep.tsx
+│   ├── ContractEditor.tsx
+│   ├── ContractViewer.tsx
+│   └── admin/
+│       ├── ApplicantTabs.tsx
+│       ├── EvaluationScorecard.tsx
+│       ├── InternalNotes.tsx
+│       ├── ApplicationTimeline.tsx
+│       ├── KanbanBoard.tsx
+│       └── TargetTracker.tsx
+├── lib/
+│   ├── permissions.ts                   ← Role-based permission map
+│   ├── audit.ts                         ← logAuditEvent() utility
+│   ├── email.ts                         ← Resend email utility
+│   ├── email-templates/                 ← React Email templates
+│   └── export.ts                        ← CSV/PDF generators
+```
+
+---
+
+## ⚠️ Remaining Questions
+
+> [!IMPORTANT]
+> **Applicant login choice:** I've recommended "Delayed Login" (no account on apply, magic link sent later). Do you agree with this approach, or do you prefer the current system where they create a password during application? This is a BIG architectural decision that affects Phase 1.
+
+> [!NOTE]
+> **Everything else is locked in and ready to build.** Once you confirm the login approach, I can start Phase 1 immediately.

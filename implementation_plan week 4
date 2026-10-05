@@ -1,0 +1,587 @@
+# OneNetworx Platform — Boss Requirements Implementation Plan
+
+> **Goal:** Transform the current recruitment platform into an enterprise-grade, multi-role agent portal with automated screening, evaluation pipeline, e-contracts, training, monitoring, and full admin control.
+
+---
+
+## 📋 Boss Requirements → Feature Map
+
+Below is every requirement your boss listed, mapped to what exists today, what's missing, and exactly how I'd build it.
+
+---
+
+## 1. Admin Levels & Role System
+
+### What the boss wants
+- 1 Super Admin who controls everything
+- Different admin levels
+- User types: Admin, Screener, User, etc.
+
+### What exists today
+- Only 2 roles: `applicant` and `admin` (stored in `profiles.role`)
+- Single admin check: `role === 'admin'`
+
+### 💡 How to implement
+
+**Expand the role system to 5 tiers:**
+
+| Role | Access Level | Description |
+|---|---|---|
+| `super_admin` | 🔴 Full | God mode. Can manage other admins, view audit logs, configure the platform, manage all settings |
+| `hr_admin` | 🟠 High | Full HR access. Review applicants, schedule interviews, manage exams, send emails, view all data |
+| `screener` | 🟡 Medium | Can ONLY view & filter new applications, mark as qualified/disqualified, add notes. Cannot hire or manage settings |
+| `agent` | 🟢 Low | A hired agent. Access to training portal, their own contract, performance dashboard |
+| `applicant` | ⚪ Basic | Can apply, take exams, view their own status. This is what exists today |
+
+**Database change:**
+```sql
+ALTER TABLE public.profiles 
+  DROP CONSTRAINT profiles_role_check,
+  ADD CONSTRAINT profiles_role_check 
+    CHECK (role IN ('applicant', 'screener', 'hr_admin', 'super_admin', 'agent'));
+```
+
+**New files needed:**
+- `src/lib/permissions.ts` — Central permission map (e.g. `canViewApplicants`, `canHireAgent`, `canManageAdmins`)
+- `src/middleware.ts` — Enhanced route protection per role
+- `src/app/admin/team/page.tsx` — Super Admin page to manage staff accounts & assign roles
+
+> [!IMPORTANT]
+> **Super Admin account:** Only 1 super_admin should exist. Created manually via Supabase SQL console. The platform should NOT have a signup form for admins — the Super Admin invites them via email.
+
+---
+
+## 2. Applicant Login — Do They Need One?
+
+### 🤔 My Recommendation: YES, but make it seamless
+
+Here's why and how:
+
+| Approach | Pros | Cons |
+|---|---|---|
+| **No login** (anonymous form) | Simpler UX | Can't track applicant status, can't do exams, can't show dashboard, can't send them back to check progress |
+| **Login after apply** ✅ (current) | Applicants get a dashboard, can take exams, check status, upload more docs | Extra step during application |
+| **Magic link login** (my recommendation) | No password to remember, ultra-modern, secure | Requires email infrastructure |
+
+**My recommendation:** Keep the current approach (create account during application) BUT add these improvements:
+
+1. **Magic Link option** — After first application, let them log back in via email magic link (no password needed)
+2. **Application tracking page** — `/track?email=xxx` public page where they enter email to get a status update (no login required)
+3. **Password is optional** — During application, auto-generate a password or use magic link only
+
+> [!TIP]
+> The current system already creates a Supabase auth account during application. This is the right pattern. The applicant can log in later to check their status at `/dashboard`.
+
+---
+
+## 3. Screening Questions (Auto-Filter on Application)
+
+### What the boss wants
+- Screening should happen IMMEDIATELY when they start the form
+- Application form should filter qualified vs. unqualified
+- Screening questions built into the application
+
+### 💡 How to implement
+
+**Add a "Step 0" to the application form — Knockout Questions:**
+
+Before they even fill in personal details, show 5-8 screening questions that instantly determine eligibility.
+
+```
+Example Knockout Questions:
+──────────────────────────
+1. Are you at least 18 years old?           → [Yes] [No] ← "No" = instant disqualify
+2. Are you legally authorized to work?      → [Yes] [No] ← "No" = instant disqualify  
+3. Do you have at least 1 year of sales     → [Yes] [No] ← "No" = flag as "needs review"
+   experience?
+4. Are you comfortable with commission-     → [Yes] [No] ← "No" = instant disqualify
+   based compensation?
+5. Can you commit to full-time work?        → [Full-time] [Part-time] [Flexible]
+6. How did you hear about us?               → [Dropdown options]
+7. What is your expected monthly income?    → [Range selector]
+8. Do you have your own laptop/device?      → [Yes] [No]
+```
+
+**Technical implementation:**
+
+1. **New DB table: `screening_questions`**
+   - Admin can configure questions via `/admin/screening`
+   - Each question has: `text`, `type` (yes/no, multiple choice, range), `is_knockout` (boolean), `knockout_answer` (the disqualifying answer)
+
+2. **New DB table: `screening_responses`**
+   - Stores each applicant's screening answers
+   - Has a `qualified` boolean field (auto-computed)
+
+3. **Application form flow becomes:**
+   ```
+   Step 0: Screening Questions (knockout)
+     ↓ PASS → Continue
+     ↓ FAIL → "Thank you, but you don't meet our requirements at this time" page
+   Step 1: Personal Details
+   Step 2: Professional Background  
+   Step 3: Resume Upload
+   Step 4: Terms & Agreement ← NEW
+   ```
+
+4. **Admin `/admin/screening` page:**
+   - Create/edit/reorder screening questions
+   - Set knockout rules
+   - View screening pass/fail analytics
+
+**New files:**
+- `src/app/admin/screening/page.tsx` — Manage screening questions
+- `src/components/ScreeningStep.tsx` — The knockout screening UI
+- `src/api/screening/route.ts` — API to manage questions
+
+---
+
+## 4. Evaluation System
+
+### What the boss wants
+- HR can evaluate applicants
+- View exam answers, resume, application data all in one place
+
+### 💡 How to implement
+
+**Build an "Applicant 360° Profile" page:** `/admin/applicants/[id]`
+
+This is a single page where HR sees EVERYTHING about an applicant:
+
+```
+┌─────────────────────────────────────────────────────┐
+│  APPLICANT PROFILE: John Doe                         │
+│  Status: ●  Under Review                            │
+├──────────┬──────────┬──────────┬──────────┬──────────┤
+│ Overview │ Screening│ Exam     │ Interview│ Documents│  ← Tab navigation
+├──────────┴──────────┴──────────┴──────────┴──────────┤
+│                                                      │
+│  [Overview Tab]                                      │
+│  ├─ Personal Details (name, email, phone)            │
+│  ├─ Professional Background                         │
+│  ├─ Screening Answers + Score                        │
+│  ├─ Timeline of all actions taken                    │
+│  └─ Internal Notes (HR can add notes)                │
+│                                                      │
+│  [Exam Tab]                                          │
+│  ├─ Exam score breakdown                             │
+│  ├─ Each question + their answer + correct answer    │
+│  └─ Manual grading for essay questions               │
+│                                                      │
+│  [Documents Tab]                                     │
+│  ├─ Resume viewer (PDF embed)                        │
+│  ├─ E-Contract (if signed)                           │
+│  └─ Any uploaded certificates                        │
+│                                                      │
+│  [ACTIONS SIDEBAR]                                   │
+│  ├─ Change Stage: [Dropdown ▼]                       │
+│  ├─ Send Email: [Template ▼]                         │
+│  ├─ Schedule Interview: [Date picker]                │
+│  ├─ Add Internal Note: [Text area]                   │
+│  └─ Reject / Hire: [Buttons]                         │
+└──────────────────────────────────────────────────────┘
+```
+
+**New files:**
+- `src/app/admin/applicants/[id]/page.tsx` — Full applicant profile
+- `src/components/admin/ApplicantTabs.tsx` — Tab navigation component
+- `src/components/admin/EvaluationScorecard.tsx` — Visual scoring UI
+- `src/components/admin/InternalNotes.tsx` — Notes thread per applicant
+
+**New DB table:**
+```sql
+CREATE TABLE public.evaluation_notes (
+  id uuid default gen_random_uuid() primary key,
+  applicant_id uuid references profiles(id),
+  author_id uuid references profiles(id),  -- which admin wrote this
+  content text not null,
+  note_type text default 'general', -- 'general', 'screening', 'interview', 'exam'
+  created_at timestamptz default now()
+);
+```
+
+---
+
+## 5. Terms & Agreement / Data Privacy / Policy
+
+### What the boss wants
+- Terms and agreement
+- Data privacy
+- Terms policy
+
+### 💡 How to implement
+
+1. **Add Step 4 to Application Form — Legal Consent:**
+   - Terms of Service checkbox (required)
+   - Data Privacy Policy checkbox (required)  
+   - Marketing communications checkbox (optional)
+   - Timestamp when they agreed stored in DB
+
+2. **New pages:**
+   - `/terms` — Full Terms of Service page
+   - `/privacy` — Full Data Privacy Policy page
+   - Both are public, static content pages
+
+3. **Admin-editable:** Let admin edit these documents from `/admin/settings/legal`
+
+4. **DB change:**
+   ```sql
+   ALTER TABLE public.profiles 
+     ADD COLUMN terms_accepted_at timestamptz,
+     ADD COLUMN privacy_accepted_at timestamptz;
+   ```
+
+**New files:**
+- `src/app/terms/page.tsx`
+- `src/app/privacy/page.tsx`
+- `src/components/LegalConsentStep.tsx` — Checkbox UI in application form
+
+---
+
+## 6. E-Contract for Hired Agents
+
+### What the boss wants
+- E-contract if agent is hired
+
+### 💡 How to implement
+
+When an applicant reaches "Hired" stage, generate an e-contract:
+
+1. **Admin uploads a contract template** (PDF or rich text) at `/admin/settings/contracts`
+2. **System auto-fills** applicant name, date, position, terms
+3. **Applicant gets notified** → logs in → sees contract at `/dashboard/contract`
+4. **Digital signature:** Applicant types their full name + checks "I agree" + timestamp = legally binding e-signature
+5. **PDF generated** and stored in Supabase storage
+
+**New DB table:**
+```sql
+CREATE TABLE public.contracts (
+  id uuid default gen_random_uuid() primary key,
+  applicant_id uuid references profiles(id),
+  template_id uuid,
+  status text default 'pending' check (status in ('pending', 'sent', 'viewed', 'signed', 'expired')),
+  signed_name text,
+  signed_at timestamptz,
+  contract_url text,  -- stored PDF
+  created_at timestamptz default now()
+);
+```
+
+**New files:**
+- `src/app/dashboard/contract/page.tsx` — Agent views & signs contract
+- `src/app/admin/contracts/page.tsx` — Admin manages contract templates
+- `src/components/ContractViewer.tsx` — Contract display + signature UI
+- `src/api/contracts/route.ts` — Generate & manage contracts
+
+---
+
+## 7. Training Portal
+
+### What the boss wants
+- Training capability
+- Job application AND training in one portal
+
+### 💡 How to implement
+
+After an agent is hired and signs their contract, they unlock the **Training Portal**:
+
+```
+/dashboard/training
+├── Training Modules (video + text lessons)
+├── Module Quizzes (reuse exam engine)
+├── Progress Tracker (% complete)
+└── Certificates (on completion)
+```
+
+**New DB tables:**
+```sql
+CREATE TABLE public.training_modules (
+  id uuid default gen_random_uuid() primary key,
+  title text not null,
+  description text,
+  content text,          -- rich text / markdown
+  video_url text,        -- YouTube/Vimeo embed
+  order_index integer,
+  required boolean default true,
+  created_at timestamptz default now()
+);
+
+CREATE TABLE public.training_progress (
+  id uuid default gen_random_uuid() primary key,
+  agent_id uuid references profiles(id),
+  module_id uuid references training_modules(id),
+  status text default 'not_started' check (status in ('not_started', 'in_progress', 'completed')),
+  completed_at timestamptz,
+  quiz_score integer,
+  UNIQUE(agent_id, module_id)
+);
+```
+
+**New files:**
+- `src/app/dashboard/training/page.tsx` — Module list with progress
+- `src/app/dashboard/training/[id]/page.tsx` — Individual module view
+- `src/app/admin/training/page.tsx` — Admin manages training content
+
+---
+
+## 8. Monitor Module / Audit Log (Super Admin)
+
+### What the boss wants
+- Can monitor the actions of admin through super admin
+- Monitor module
+
+### 💡 How to implement
+
+**Create an audit trail that logs EVERY admin action:**
+
+```sql
+CREATE TABLE public.audit_log (
+  id uuid default gen_random_uuid() primary key,
+  user_id uuid references profiles(id),
+  action text not null,           -- 'advanced_stage', 'sent_email', 'scheduled_interview', etc.
+  target_type text,               -- 'applicant', 'exam', 'interview', 'contract'
+  target_id uuid,                 -- the ID of what was affected
+  metadata jsonb,                 -- extra details: { from_stage: 'x', to_stage: 'y' }
+  ip_address text,
+  created_at timestamptz default now()
+);
+```
+
+**Super Admin `/admin/audit` page:**
+- Filterable table of ALL admin actions
+- Filter by: admin user, action type, date range
+- Shows: "HR Admin Jane moved applicant John Doe from 'Under Review' to 'Interview Scheduled' at 2:34 PM"
+- Export to CSV
+
+**Implementation:** Create a utility function `logAuditEvent()` that gets called in every API route that modifies data.
+
+**New files:**
+- `src/app/admin/audit/page.tsx` — Audit log viewer (super_admin only)
+- `src/lib/audit.ts` — `logAuditEvent()` utility
+- `src/api/admin/audit/route.ts` — Fetch audit logs with filters
+
+---
+
+## 9. Dashboard Enhancements for HR
+
+### What the boss wants
+- Dashboard for admin to review HR
+- View the application, exam, resume
+- Target applications check on HR
+
+### 💡 How to implement
+
+Enhance the existing admin dashboard with:
+
+1. **HR Performance Cards:**
+   - Applications reviewed today / this week
+   - Average time-to-review
+   - Screener throughput (how many each screener processed)
+
+2. **Pipeline Kanban Board:** `/admin/pipeline`
+   - Drag-and-drop board: `Applied → Screening → Exam → Interview → Hired`
+   - Each card shows applicant name, score, days in stage
+
+3. **Target Tracker:**
+   - Set weekly/monthly hiring targets
+   - Visual gauge showing progress vs. target
+
+**New files:**
+- `src/app/admin/pipeline/page.tsx` — Kanban board view
+- `src/components/admin/KanbanBoard.tsx`
+- `src/components/admin/TargetTracker.tsx`
+
+---
+
+## 10. Downloadable Information / Export
+
+### What the boss wants
+- Interface option to download
+- Downloadable information
+
+### 💡 How to implement
+
+Add export buttons throughout the admin panel:
+
+| What | Format | Where |
+|---|---|---|
+| Applicant list | CSV, Excel | `/admin/applicants` page → "Export" button |
+| Single applicant profile | PDF | `/admin/applicants/[id]` → "Download Profile" |
+| Exam results | CSV | `/admin/exams` → "Export Results" |
+| Audit log | CSV | `/admin/audit` → "Export Log" |
+| Interview schedule | Calendar (ICS) | `/admin/interviews` → "Export Calendar" |
+| Statistics report | PDF | `/admin` dashboard → "Download Report" |
+
+**Technical:** Use libraries like `jspdf` + `html2canvas` for PDF generation, and `papaparse` for CSV export.
+
+**New files:**
+- `src/lib/export.ts` — Shared export utilities (CSV, PDF generators)
+- `src/api/admin/export/route.ts` — Server-side export endpoint
+
+---
+
+## 11. Customizable Hero Section
+
+### What the boss wants
+- Hero section can be customized (by admin)
+
+### 💡 How to implement
+
+Build a CMS-lite for the landing page hero:
+
+**Admin `/admin/settings/hero` page with editable fields:**
+- Hero headline text
+- Hero subtitle text
+- CTA button text + link
+- Background image upload
+- Accent color picker
+
+**Store in a `site_settings` table:**
+```sql
+CREATE TABLE public.site_settings (
+  key text primary key,
+  value jsonb not null,
+  updated_at timestamptz default now()
+);
+```
+
+The homepage fetches these settings server-side and renders them dynamically.
+
+**New files:**
+- `src/app/admin/settings/hero/page.tsx` — Hero editor with live preview
+- `src/api/settings/route.ts` — CRUD for site settings
+
+---
+
+## 12. Email Notifications with Status Tracking
+
+### What the boss wants
+- Next step: interview or email
+- Can be noted if sent to the email
+
+### 💡 How to implement
+
+1. **Email templates** managed by admin: Welcome, Interview Invite, Rejection, Offer, Custom
+2. **Email log table** — every email sent is recorded:
+   ```sql
+   CREATE TABLE public.email_log (
+     id uuid default gen_random_uuid() primary key,
+     recipient_id uuid references profiles(id),
+     template_name text,
+     subject text,
+     status text default 'sent' check (status in ('sent', 'delivered', 'opened', 'failed')),
+     sent_by uuid references profiles(id),
+     sent_at timestamptz default now()
+   );
+   ```
+3. **Visual indicator** on applicant cards: 📧 icon with "Last emailed: 2d ago" or "No email sent"
+
+---
+
+## 13. 🧠 MY OWN RECOMMENDATIONS (Bonus Features)
+
+These are features your boss didn't explicitly ask for, but would **massively** improve the platform:
+
+### A. Applicant Self-Service Dashboard Enhancement
+Let applicants see their own pipeline stage visually:
+```
+Applied ──●── Screening ──○── Exam ──○── Interview ──○── Hired
+           ↑ You are here
+```
+
+### B. Bulk Actions
+HR should be able to select 20 applicants → "Advance All to Exam" or "Reject All" or "Send Mass Email" in one click.
+
+### C. Notification Center (In-App)
+Replace the basic bell icon with a full notification center:
+- "Your interview is in 2 hours"
+- "New applicant requires screening"
+- "Contract awaiting signature"
+
+### D. Dark/Light Mode for Admin Panel
+The admin panel is dark-only right now. Some HR staff may prefer light mode during long work sessions.
+
+### E. Two-Factor Authentication (2FA)
+For admin accounts — add TOTP (Google Authenticator) support. This is a security must-have for a platform handling PII.
+
+### F. Applicant Duplicate Detection
+Before creating a new applicant, check if the email already exists. Show: "You've already applied. Want to check your status instead?"
+
+### G. Automated Email Sequences
+When someone applies → auto-send "We received your application" email. When they pass screening → auto-send "You're invited to take the exam." No manual action needed.
+
+---
+
+## 🗂️ Summary of ALL New Database Tables
+
+| Table | Purpose |
+|---|---|
+| `screening_questions` | Admin-configurable knockout questions |
+| `screening_responses` | Applicant answers to screening |
+| `evaluation_notes` | Internal HR notes per applicant |
+| `contracts` | E-contract tracking & signatures |
+| `training_modules` | Training content for hired agents |
+| `training_progress` | Agent training completion tracking |
+| `audit_log` | Every admin action logged |
+| `site_settings` | CMS settings (hero, branding) |
+| `email_log` | Track all emails sent |
+| `applications` | Multi-job application support (fixes the "one job" bug) |
+
+---
+
+## 🏗️ Phased Build Order
+
+### Phase 1 — Foundation (Week 1-2)
+- [ ] Expand role system (5 tiers)
+- [ ] Permission system (`lib/permissions.ts`)
+- [ ] Database migrations (new tables)
+- [ ] Terms & Privacy pages
+- [ ] Legal consent step in application form
+
+### Phase 2 — Screening & Evaluation (Week 2-3)
+- [ ] Screening questions engine (admin + applicant side)
+- [ ] Knockout logic in application form
+- [ ] Applicant 360° profile page
+- [ ] Internal notes system
+- [ ] Evaluation scorecard
+
+### Phase 3 — Contracts & Training (Week 3-4)
+- [ ] E-contract system
+- [ ] Contract signing flow
+- [ ] Training module builder (admin)
+- [ ] Training portal (agent dashboard)
+
+### Phase 4 — Monitoring & Export (Week 4-5)
+- [ ] Audit log system
+- [ ] Super Admin audit viewer
+- [ ] CSV/PDF export utilities
+- [ ] Email logging & tracking
+- [ ] Pipeline Kanban board
+
+### Phase 5 — Customization & Polish (Week 5-6)
+- [ ] Customizable hero section (admin CMS)
+- [ ] Bulk actions
+- [ ] Notification center upgrade
+- [ ] Automated email sequences
+- [ ] Final security audit & testing
+
+---
+
+## ⚠️ Open Questions for You
+
+> [!IMPORTANT]
+> **1. Super Admin creation:** Should the Super Admin be a hardcoded email (e.g., your boss's email), or should there be a first-time setup page?
+
+> [!IMPORTANT]  
+> **2. Training content format:** Does your boss want video-based training (YouTube/Vimeo embeds), text/document-based training, or both?
+
+> [!IMPORTANT]
+> **3. E-Contract:** Does your company already have a contract template (Word/PDF)? Or should I build a contract BUILDER where admin types it in?
+
+> [!IMPORTANT]
+> **4. Email provider:** Which email service should we use? Options: Resend (easiest), SendGrid (most popular), or AWS SES (cheapest at scale)?
+
+> [!IMPORTANT]
+> **5. Screening questions:** Should a disqualified applicant be told immediately "you don't qualify," or should it silently flag them and let HR decide?
+
+> [!IMPORTANT]
+> **6. Priority:** Which features does your boss want FIRST? I'd recommend Phase 1 + Phase 2 (roles + screening) as the highest priority since they affect the core application flow.
