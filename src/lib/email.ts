@@ -12,13 +12,15 @@ import nodemailer from 'nodemailer';
  * 3. Go to App passwords → Generate one for "Mail"
  */
 
-const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-        user: process.env.GMAIL_USER,
-        pass: process.env.GMAIL_APP_PASSWORD,
-    },
-});
+function getTransporter() {
+    return nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+            user: process.env.GMAIL_USER,
+            pass: process.env.GMAIL_APP_PASSWORD,
+        },
+    });
+}
 
 export interface EmailOptions {
     to: string;
@@ -37,6 +39,7 @@ export async function sendEmail(options: EmailOptions): Promise<{ success: boole
             return { success: false, error: 'Email not configured' };
         }
 
+        const transporter = getTransporter();
         await transporter.sendMail({
             from: `"OneNetworx" <${process.env.GMAIL_USER}>`,
             to: options.to,
